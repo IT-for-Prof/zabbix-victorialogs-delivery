@@ -1,0 +1,196 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: a571c0d144b14fd4a87a9d9b2aa9fcd6
+      name: Templates/Applications
+  templates:
+    - uuid: dde74ad40bdd40668ef9ff4c8a03c25b
+      template: 'Vector log shipper by Zabbix agent'
+      name: 'Vector log shipper by Zabbix agent'
+      description: |
+        Sender-side leading indicators for a Vector log shipper, using only native Zabbix agent keys. Nothing is installed on the monitored host: no script, no UserParameter, no config change.
+        
+        Requires Zabbix agent 2 for the systemd key, and agent version 7.0 or newer for the 30s item timeouts on the two directory walks. An older agent ignores the item timeout and applies Timeout from its own config file, default 3 seconds, which is too short for walking a large buffer - it fails exactly when the buffer signal matters most. On an older agent, raise Timeout in zabbix_agent2.conf instead.
+        
+        Scope:
+        - systemd state of the shipper unit, and its automatic restart counter, because a crash-looping unit reads active at every poll
+        - size of the Vector disk buffer, which grows hours before delivery actually stops
+        - a positive control that the buffer path actually holds files
+        
+        Why the positive control: vfs.dir.size answers 0 for a directory that does not exist, with no error and no unsupported state, and it skips entries it cannot read rather than failing. A wrong path macro, a shipper configured with a memory buffer, or a data subdirectory the agent cannot enter all leave the size item on a permanently healthy number and its trigger unable to fire. The control counts files under the path rather than measuring bytes, because an existing directory never measures exactly 0 bytes - the directory inodes themselves count - so a size-based control cannot see any of those cases.
+        
+        NOT available: whether delivery is actually arriving. That is only knowable at the receiver. Link the companion template VictoriaLogs delivery by HTTP for that.
+        
+        Macros:
+        - VECTOR.UNIT: systemd unit name, default vector.service.
+        - VECTOR.RESTARTS.WARN: automatic restarts within an hour before the unit counts as crash-looping, default 2.
+        - VECTOR.BUFFER.DIR: buffer directory, default /var/lib/vector/buffer. Walked twice per interval, once for size and once for the file count.
+        - VECTOR.BUFFER.WARN: bytes, default half of a 512 MiB max_size.
+        - VECTOR.BUFFER.HIGH: bytes, default 90 percent of a 512 MiB max_size. With when_full set to block, a full buffer stops the host reading its own journal.
+        
+        Set the two byte thresholds to match max_size in that host's Vector sink if it differs from 512 MiB.
+        
+        Author:  Konstantin Tyutyunnik
+        Site:    https://itforprof.com
+        License: MIT (c) 2026 Konstantin Tyutyunnik
+      vendor:
+        name: itforprof.com
+        version: 1.0.0
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: d7c1cab8adbf43109789bbcdc212d2d7
+          name: 'Vector service state'
+          type: ZABBIX_ACTIVE
+          key: 'systemd.unit.info[{$VECTOR.UNIT},ActiveState]'
+          delay: 5m
+          history: 7d
+          value_type: CHAR
+          tags:
+            - tag: component
+              value: shipper
+            - tag: scope
+              value: availability
+          triggers:
+            - uuid: 7523f45986254fc4b3b1aadae9ab9a43
+              expression: 'last(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState])<>"active"'
+              name: 'Vector is not running'
+              event_name: 'Vector on {HOST.NAME} is {ITEM.LASTVALUE1}: this host has stopped shipping logs'
+              priority: AVERAGE
+              description: 'Leading indicator. The receiver-side lag trigger for this host will follow within the lag threshold, but this one fires immediately.'
+              dependencies:
+                - name: 'Vector service state is unknown'
+                  expression: 'nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.NODATA})=1'
+            - uuid: 6bfbe7bf45da43c0be47e54112af9f7f
+              expression: 'nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.NODATA})=1'
+              name: 'Vector service state is unknown'
+              event_name: 'Vector state on {HOST.NAME} is unknown: the agent stopped answering'
+              priority: AVERAGE
+              description: 'The state item itself stopped collecting, so the running and buffer checks below cannot mean anything and depend on this.'
+        - uuid: 9b6ae5a5d89c46fda487e82cd7985d4a
+          name: 'Vector automatic restarts'
+          type: ZABBIX_ACTIVE
+          key: 'systemd.unit.info[{$VECTOR.UNIT},NRestarts,Service]'
+          delay: 5m
+          history: 7d
+          trends: '0'
+          description: 'systemd restart counter for the unit. A shipper that crashes and is restarted by its Restart= policy reads active at every poll, so the state item alone cannot see a crash loop. The third key parameter is required: NRestarts lives on the Service interface, and the default Unit interface answers Unknown interface. This item has no blindness root of its own: it shares the agent, the systemd plugin and the D-Bus connection with the state item, so every failure that stops collection in practice - agent down, D-Bus down, unit renamed - stops both, and the root on the state item already reports it. The two are not literally the same call, though: ActiveState reads the Unit interface and this reads Service, so a fault scoped to one interface would silence this item alone. That gap is accepted rather than unnoticed.'
+          tags:
+            - tag: component
+              value: shipper
+            - tag: scope
+              value: availability
+          triggers:
+            - uuid: 9f29b2530e0e4f2093c1e1e5ac09bd7a
+              expression: '(last(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},NRestarts,Service])-min(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},NRestarts,Service],1h))>{$VECTOR.RESTARTS.WARN}'
+              name: 'Vector is restarting repeatedly'
+              event_name: 'Vector on {HOST.NAME} has been restarted by systemd more than {$VECTOR.RESTARTS.WARN} times in the last hour'
+              priority: WARNING
+              description: 'The unit is up whenever it is polled, so neither the state trigger nor the buffer triggers see anything, but the shipper keeps dying and being restarted. Each restart loses whatever was in flight. Counting the rise over an hour rather than any change at all keeps a single planned restart quiet, and tolerates the counter being reset to zero when the unit is stopped and started by hand.'
+              dependencies:
+                - name: 'Vector service state is unknown'
+                  expression: 'nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.NODATA})=1'
+        - uuid: 0be1d5d09f0e4d1b9e73d4adf2357c54
+          name: 'Vector disk buffer size'
+          type: ZABBIX_ACTIVE
+          key: 'vfs.dir.size[{$VECTOR.BUFFER.DIR}]'
+          delay: 5m
+          history: 7d
+          units: B
+          timeout: 30s
+          tags:
+            - tag: component
+              value: shipper
+            - tag: scope
+              value: capacity
+          triggers:
+            - uuid: c458c20e60ee4aea87faac8359518140
+              expression: 'nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.NODATA})=1'
+              name: 'Vector buffer size is not being measured'
+              event_name: 'Buffer size on {HOST.NAME} stopped being measured: the size thresholds below cannot fire'
+              priority: AVERAGE
+              description: 'The directory walk stopped returning, most likely a timeout. This degrades exactly when the buffer is large and the disk is under pressure, which is when the size signal matters most. Without this trigger the size checks would keep their last known value and stay quiet.'
+            - uuid: 0f2e8d27c02c41fda28ef2a3798d6b02
+              expression: 'last(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}])>{$VECTOR.BUFFER.WARN}'
+              name: 'Vector disk buffer is above the warning level'
+              event_name: 'Vector buffer on {HOST.NAME} at {ITEM.LASTVALUE1}: past VECTOR.BUFFER.WARN, delivery has been falling behind'
+              priority: WARNING
+              description: 'Earliest signal that delivery is degrading, hours ahead of the receiver-side lag trigger. This is a level, not a trend: a buffer parked at a steady size above the threshold keeps this open, and a buffer climbing fast but still under the threshold does not open it at all. Detecting growth instead would need a baseline, and picking that baseline is an estate decision - see docs/known-limits.md.'
+              dependencies:
+                - name: 'Vector buffer size is not being measured'
+                  expression: 'nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.NODATA})=1'
+                - name: 'Vector disk buffer is nearly full'
+                  expression: 'last(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}])>{$VECTOR.BUFFER.HIGH}'
+            - uuid: d308b5118a8b4ee58f213eb13fb71f7e
+              expression: 'last(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}])>{$VECTOR.BUFFER.HIGH}'
+              name: 'Vector disk buffer is nearly full'
+              event_name: 'Vector buffer on {HOST.NAME} at {ITEM.LASTVALUE1}: with when_full block, journald reads stall when it fills'
+              priority: AVERAGE
+              description: 'Delivery has been failing for a while and the shipper is queueing to disk. When the buffer reaches max_size and when_full is block, the host stops reading its own journal.'
+              dependencies:
+                - name: 'Vector buffer size is not being measured'
+                  expression: 'nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.NODATA})=1'
+                - name: 'Vector is not running'
+                  expression: 'last(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState])<>"active"'
+        - uuid: c7643e1cd24d40c38edda0268ee4e220
+          name: 'Vector disk buffer files'
+          type: ZABBIX_ACTIVE
+          key: 'vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file]'
+          delay: 5m
+          history: 7d
+          trends: '0'
+          timeout: 30s
+          description: 'Positive control. vfs.dir.size answers 0 for a missing directory instead of failing, and it skips entries it cannot read rather than failing, so without a control a wrong path macro, a memory-buffer shipper, or an unreadable data subdirectory would leave the size item on a permanently healthy number. The control counts files instead of measuring bytes: an existing directory never measures exactly 0 bytes, because the directory inodes themselves count, so a size-based control cannot detect any of those cases. Costs a second directory walk alongside the size item.'
+          tags:
+            - tag: component
+              value: shipper
+            - tag: scope
+              value: availability
+          triggers:
+            - uuid: 6ae4f7062ede4adfaa2990074bf6c4ea
+              expression: 'last(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file])=0'
+              name: 'Vector buffer alarm is blind'
+              event_name: 'No buffer files under the buffer path on {HOST.NAME}: the buffer size check cannot alert'
+              priority: AVERAGE
+              description: 'The buffer path holds no files at all. Either the path macro is wrong, or this shipper has no disk buffer configured, or the agent cannot traverse the subtree. In all three the size item keeps reporting a small, permanently healthy number and its trigger can never fire.'
+              dependencies:
+                - name: 'Vector buffer file count is not being measured'
+                  expression: 'nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.NODATA})=1'
+            - uuid: 6efdf4651ade4116afb2bf38460c7fa3
+              expression: 'nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.NODATA})=1'
+              name: 'Vector buffer file count is not being measured'
+              event_name: 'The buffer positive control on {HOST.NAME} stopped reporting: the blindness check is itself blind'
+              priority: AVERAGE
+              description: 'This item is the positive control that proves the buffer size reading is real. If it alone stops collecting while the unit state keeps reporting, the blindness trigger freezes on its last value and never fires. Its own root closes that hole.'
+      tags:
+        - tag: class
+          value: log-delivery
+        - tag: vendor
+          value: vector
+      macros:
+        - macro: '{$VECTOR.BUFFER.DIR}'
+          value: /var/lib/vector/buffer
+          description: 'Vector disk buffer directory.'
+        - macro: '{$VECTOR.BUFFER.HIGH}'
+          value: '483183820'
+          description: 'Bytes. 90 percent of a 512 MiB max_size.'
+        - macro: '{$VECTOR.BUFFER.WARN}'
+          value: '268435456'
+          description: 'Bytes. Half of a 512 MiB max_size. With when_full block, a filling buffer stalls journald reads hours before delivery stops.'
+        - macro: '{$VECTOR.NODATA}'
+          value: 15m
+          description: 'nodata window for all three agent items, about 3x their interval.'
+        - macro: '{$VECTOR.RESTARTS.WARN}'
+          value: '2'
+          description: 'Automatic restarts within an hour before the unit counts as crash-looping. A single planned restart stays quiet.'
+        - macro: '{$VECTOR.UNIT}'
+          value: vector.service
+          description: 'systemd unit name of the log shipper.'
+  graphs:
+    - uuid: 789e228616b4478abb4457b2f1bfb8bf
+      name: 'Vector disk buffer size'
+      graph_items:
+        - color: 1A7C11
+          item:
+            host: 'Vector log shipper by Zabbix agent'
+            key: 'vfs.dir.size[{$VECTOR.BUFFER.DIR}]'

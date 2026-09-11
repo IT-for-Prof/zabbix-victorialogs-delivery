@@ -1,0 +1,8 @@
+# Deny everything, allow only what belongs in the public repo.
+*
+!*/
+!.gitignore
+!LICENSE
+!README.md
+!docs/*.md
+!template/*.yaml
