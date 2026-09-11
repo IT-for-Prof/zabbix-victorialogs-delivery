@@ -1,0 +1,230 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: a571c0d144b14fd4a87a9d9b2aa9fcd6
+      name: Templates/Applications
+  templates:
+    - uuid: 7e6cc57fdf1e447fb89ad5f41b4c87c4
+      template: 'VictoriaLogs delivery by HTTP'
+      name: 'VictoriaLogs delivery by HTTP'
+      description: |
+        Receiver-side monitoring of log delivery into VictoriaLogs.
+        
+        Senders are discovered from the log data itself. Every VictoriaLogs label that passes the label filter becomes a monitored sender within a minute of its first line - no host group, no API token, no registration step to forget.
+        
+        The usual objection to discovering targets from the observed signal is that a dead target disappears from the data together with its alert, exactly when the problem is worst. That is answered here by the discovery rule rather than by a second registry: lost resources are never disabled and are deleted only after 30 days, so a sender that stops shipping keeps its item, falls to the 99999999 sentinel and keeps alerting.
+        
+        The cost is the opposite case: a sender whose shipper is installed but has never delivered a single line has no label at all, so nothing discovers it. The companion sender-side template covers the daemon, its restarts and its buffer; this template cannot see a host it has never heard from.
+        
+        Retirement is therefore deliberate, and it pages if forgotten: exclude the label with LOG.LABEL.EXCLUDE, or disable the discovered item by hand, BEFORE stopping the shipper. Stopping the shipper first leaves an alerting item for up to 30 days.
+        
+        Scope:
+        - age of the newest log line that reached VictoriaLogs, per sender
+        - liveness of the collection chain, as the dependency root of every per-sender trigger
+        - a sender whose clock runs ahead, which would otherwise silently extend its own alert deadline
+        
+        What this does NOT measure, by construction:
+        - Completeness. It asserts that a recent line carrying this label arrived, not that everything did. After a long outage a shipper replays its buffer with the original timestamps, so the per-sender trigger resolves as soon as delivery resumes while the backlog is still draining, and whatever overflowed the buffer is never reported. A pipeline that loses one of several sources also stays green as long as any source keeps flowing under the same label.
+        - A sender that has never shipped. See above.
+        - Why delivery stopped. Link the companion template Vector log shipper by Zabbix agent on the sender for that.
+        
+        Macros:
+        - VL.WINDOW: LogsQL lookback, applied as _time:>now-VL.WINDOW. The right edge is deliberately open: _time:VL.WINDOW would mean the closed range from now minus the window to now, which drops any line stamped in the future, and a sender whose clock runs ahead would vanish from the result set instead of reporting the negative age the skew trigger looks for. Must not exceed VictoriaLogs retention. The window is also the discovery horizon: a label silent longer than it stops being discovered, and its item is deleted 30 days later.
+        - LOG.LABEL.MATCHES: a label is discovered only if it matches this. The default accepts what can safely become an item key; a label with a space or a quote is rejected rather than breaking the key.
+        - LOG.LABEL.EXCLUDE: labels matching this are never discovered. The default ^$ excludes nothing. This is where one-off probes, test labels and retired senders go - anything that writes into VictoriaLogs but must not be monitored as a sender.
+        - LOG.LAG.WARN: seconds before a sender counts as late, default 900. To override for one sender, define the context macro on the receiver host, keyed by the sender's VictoriaLogs label (not its Zabbix host name - this template never consults a Zabbix host object).
+        - LOG.CLOCKSKEW.WARN: seconds a sender clock may run ahead before it is reported, default 60. Both skew triggers compare log age against minus this value.
+        
+        Requirements: VictoriaLogs reachable from the Zabbix server, with host as a stream field.
+        
+        Author:  Konstantin Tyutyunnik
+        Site:    https://itforprof.com
+        License: MIT (c) 2026 Konstantin Tyutyunnik
+      vendor:
+        name: itforprof.com
+        version: 2.0.1
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: e52b13c5dc254c4ea812f40c32a5cfd1
+          name: 'Smallest log age across senders'
+          type: DEPENDENT
+          key: log.age.min
+          delay: '0'
+          history: 7d
+          value_type: FLOAT
+          trends: '0'
+          units: s
+          description: 'Age is receiver-now minus a timestamp the sender supplies, so a sender whose clock runs ahead reports a negative age and quietly extends its own alert deadline by the skew. A negative minimum is the only place skew shows up for a label that discovery never picked up - one excluded by LOG.LABEL.EXCLUDE or rejected by LOG.LABEL.MATCHES.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$[*].age.min()'
+          master_item:
+            key: log.freshness.raw
+          tags:
+            - tag: component
+              value: freshness
+            - tag: scope
+              value: availability
+          triggers:
+            - uuid: db4c3595ae3f4c8eb95fc6a3b2b442c1
+              expression: 'nodata(/VictoriaLogs delivery by HTTP/log.age.min,{$LOG.VL.NODATA})=1'
+              name: 'VictoriaLogs freshness query returns no data'
+              event_name: 'Log delivery monitoring is blind: VictoriaLogs freshness query on {HOST.NAME} stopped returning data'
+              priority: AVERAGE
+              description: 'The receiver-side query itself is down, so every per-sender lag trigger is meaningless and depends on this one. Check VictoriaLogs and the item log.freshness.raw. The root sits on this item because it holds history and carries no preprocessing that a macro typo could break - a blindness detector must not be breakable by configuration.'
+            - uuid: 034566d08e5848618962fe1c06080386
+              expression: 'last(/VictoriaLogs delivery by HTTP/log.age.min)<-{$LOG.CLOCKSKEW.WARN}'
+              name: 'A sender clock is ahead of the receiver'
+              event_name: 'Newest log age is {ITEM.LASTVALUE1}: a sender clock is ahead of the receiver and its lag alert is delayed by that much'
+              priority: WARNING
+              description: 'Log age is receiver-now minus a timestamp the sender controls, and the query takes a maximum, so one future-dated event is enough. While the sender is healthy this looks better than a correct host - a negative age passes every threshold. When it stops shipping, its alert arrives late by exactly the skew, unbounded. Find the skewed sender and fix its clock or its timestamp parsing.'
+              dependencies:
+                - name: 'VictoriaLogs freshness query returns no data'
+                  expression: 'nodata(/VictoriaLogs delivery by HTTP/log.age.min,{$LOG.VL.NODATA})=1'
+        - uuid: 5c8f76e0bd0a4ba08448c755e3fd2064
+          name: 'VictoriaLogs sender freshness'
+          type: HTTP_AGENT
+          key: log.freshness.raw
+          delay: 1m
+          history: '0'
+          value_type: TEXT
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var lines = value.split('\n');
+                  var out = [];
+                  for (var i = 0; i < lines.length; i++) {
+                      var s = lines[i].trim();
+                      if (s.length === 0) { continue; }
+                      if (s.slice(-1) !== '}') { throw 'truncated NDJSON line from VictoriaLogs'; }
+                      var o = JSON.parse(s);
+                      if (typeof o.host !== 'string' || o.age === undefined) { throw 'VictoriaLogs freshness row is missing host or age - query or LogsQL semantics changed'; }
+                      out.push(o);
+                  }
+                  if (out.length === 0) { throw 'VictoriaLogs returned no senders'; }
+                  return JSON.stringify(out);
+          timeout: 10s
+          url: '{$VL.URL}/select/logsql/query'
+          query_fields:
+            - name: query
+              value: '_time:>now-{$VL.WINDOW} | stats by (host) max(_time) as last | math (now() - last) / 1e9 as age | filter host:* | fields host, age'
+          tags:
+            - tag: component
+              value: freshness
+            - tag: scope
+              value: availability
+      discovery_rules:
+        - uuid: f2b6d758e2b6449c992d20b7f492a88d
+          name: 'Log senders discovery'
+          type: DEPENDENT
+          key: log.senders.discovery
+          delay: '0'
+          lifetime_type: DELETE_AFTER
+          lifetime: 30d
+          enabled_lifetime_type: DISABLE_NEVER
+          description: 'Senders come from the log data: every label in the freshness payload that passes the filter below becomes a monitored sender, within a minute of its first line and with nothing to register by hand. Lost resources are NEVER disabled and are deleted only after 30 days, which is what makes discovery-from-data safe here - a sender that stops shipping keeps its item, falls to the 99999999 sentinel and keeps alerting instead of quietly leaving monitoring at the worst possible moment. The same property makes retirement deliberate: exclude the label with LOG.LABEL.EXCLUDE before stopping the shipper, or the item alerts for up to 30 days. A failure of the freshness item does not run this rule at all, so nothing is marked lost while VictoriaLogs is unreachable.'
+          lld_macro_paths:
+            - lld_macro: '{#LOGHOST}'
+              path: $.host
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#LOGHOST}'
+                value: '{$LOG.LABEL.MATCHES}'
+                formulaid: A
+              - macro: '{#LOGHOST}'
+                value: '{$LOG.LABEL.EXCLUDE}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: B
+          item_prototypes:
+            - uuid: 008e76cbed08473f8ea986bcc2d6917d
+              name: 'Log delivery lag on {#LOGHOST}'
+              type: DEPENDENT
+              key: 'log.age[{#LOGHOST}]'
+              delay: '0'
+              history: 7d
+              value_type: FLOAT
+              trends: '0'
+              units: s
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.host==''{#LOGHOST}'')].age.first()'
+                  error_handler: CUSTOM_VALUE
+                  error_handler_params: '99999999'
+              master_item:
+                key: log.freshness.raw
+              tags:
+                - tag: component
+                  value: freshness
+                - tag: sender
+                  value: '{#LOGHOST}'
+              trigger_prototypes:
+                - uuid: 7dc81827757f49818aabdd36027ed73a
+                  expression: 'last(/VictoriaLogs delivery by HTTP/log.age[{#LOGHOST}])>{$LOG.LAG.WARN:"{#LOGHOST}"}'
+                  name: 'No logs from {#LOGHOST}'
+                  event_name: 'No logs from {#LOGHOST} for {ITEM.LASTVALUE1}'
+                  priority: AVERAGE
+                  description: 'Age of the newest log line that reached VictoriaLogs for this sender. The item was created the first time this label appeared and it is never disabled when the label stops arriving: a sender that goes silent keeps this item, reads 99999999 once its label leaves the query window, and keeps alerting. To raise the threshold for one noisy sender, set the context macro on THIS RECEIVER HOST keyed by the label - every item in this template lives here. Known limit: this measures recency of the newest line, not completeness. After a long outage the shipper replays its buffer with original timestamps, so this resolves as soon as delivery resumes while the backlog is still draining.'
+                  dependencies:
+                    - name: 'VictoriaLogs freshness query returns no data'
+                      expression: 'nodata(/VictoriaLogs delivery by HTTP/log.age.min,{$LOG.VL.NODATA})=1'
+                  tags:
+                    - tag: scope
+                      value: availability
+                    - tag: sender
+                      value: '{#LOGHOST}'
+                - uuid: e044ffaae7014f09b391c8641c8c2951
+                  expression: 'last(/VictoriaLogs delivery by HTTP/log.age[{#LOGHOST}])<-{$LOG.CLOCKSKEW.WARN}'
+                  name: 'Clock on {#LOGHOST} is ahead of the receiver'
+                  event_name: 'Log age for {#LOGHOST} is {ITEM.LASTVALUE1}: this sender clock is ahead and its lag alert is delayed by that much'
+                  priority: WARNING
+                  description: 'Names the skewed sender, which the estate-wide minimum cannot do. Both are kept: this one covers every discovered sender, while the minimum also sees skew on a label excluded from discovery or rejected by the label filter. Costs no new item - the per-sender age is already collected.'
+                  dependencies:
+                    - name: 'VictoriaLogs freshness query returns no data'
+                      expression: 'nodata(/VictoriaLogs delivery by HTTP/log.age.min,{$LOG.VL.NODATA})=1'
+                  tags:
+                    - tag: scope
+                      value: availability
+                    - tag: sender
+                      value: '{#LOGHOST}'
+          graph_prototypes:
+            - uuid: b8b66946f4a24d2a80197ce3fb5f0fce
+              name: 'Log delivery lag on {#LOGHOST}'
+              graph_items:
+                - color: 1A7C11
+                  item:
+                    host: 'VictoriaLogs delivery by HTTP'
+                    key: 'log.age[{#LOGHOST}]'
+          master_item:
+            key: log.freshness.raw
+      tags:
+        - tag: class
+          value: log-delivery
+        - tag: vendor
+          value: victorialogs
+      macros:
+        - macro: '{$LOG.CLOCKSKEW.WARN}'
+          value: '60'
+          description: 'Seconds a sender clock may run ahead of the receiver before it is reported. Log age is receiver-now minus a timestamp the sender supplies, so a skewed sender reads negative and both skew triggers compare against minus this value. Kept out of the alert path below a minute because a small skew is normal.'
+        - macro: '{$LOG.LABEL.EXCLUDE}'
+          value: ^$
+          description: 'Labels matching this are never discovered. The default ^$ excludes nothing, since a label is never empty. This is the retirement and exclusion mechanism: one-off probes, test labels, a relabeled sender''s old name, and any source that writes into VictoriaLogs but must not be monitored as a sender. Exclude a label BEFORE stopping its shipper - the other order leaves an alerting item for up to 30 days. Take care never to leave this empty: an empty regexp matches everything and would exclude every sender.'
+        - macro: '{$LOG.LABEL.MATCHES}'
+          value: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+          description: 'A label is discovered only if it matches this. The default accepts exactly what can safely become part of an item key, so a label carrying a space or a quote is rejected loudly at discovery instead of producing a broken item.'
+        - macro: '{$LOG.LAG.WARN}'
+          value: '900'
+          description: 'Seconds before a sender counts as late, default 900. To override for one sender, define a context macro on the receiver host keyed by the sender''s VictoriaLogs label - for example {$LOG.LAG.WARN:"pfsense-gw01"}. The label is the identity everywhere in this template; no Zabbix host object is ever consulted.'
+        - macro: '{$LOG.VL.NODATA}'
+          value: 5m
+          description: 'nodata window for the VictoriaLogs freshness query. The item polls every 1m, so this tolerates five missed polls before declaring the chain blind - deliberately wider than 3x, because a single slow answer from VictoriaLogs should not silence every per-sender trigger that depends on this root.'
+        - macro: '{$VL.URL}'
+          value: 'http://127.0.0.1:9428'
+          description: 'VictoriaLogs base URL as reachable from the Zabbix server.'
+        - macro: '{$VL.WINDOW}'
+          value: 90d
+          description: 'LogsQL lookback window, applied as _time:>now-VL.WINDOW so that lines stamped in the future stay in the result set. Must not exceed VictoriaLogs retention. It is also the discovery horizon: a label silent longer than this window stops being discovered, and its item is deleted 30 days after that.'
