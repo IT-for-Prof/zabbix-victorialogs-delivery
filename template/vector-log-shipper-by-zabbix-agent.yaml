@@ -14,7 +14,7 @@ zabbix_export:
         
         Scope:
         - systemd state of the shipper unit, and its automatic restart counter, because a crash-looping unit reads active at every poll
-        - size of the Vector disk buffer, which grows hours before delivery actually stops
+        - size of the Vector disk buffer, measured as its floor over an hour, because the raw size sweeps 0 to 128 MiB on every segment rollover even when delivery is perfectly healthy
         - a positive control that the buffer path actually holds files
         
         Why the positive control: vfs.dir.size answers 0 for a directory that does not exist, with no error and no unsupported state, and it skips entries it cannot read rather than failing. A wrong path macro, a shipper configured with a memory buffer, or a data subdirectory the agent cannot enter all leave the size item on a permanently healthy number and its trigger unable to fire. The control counts files under the path rather than measuring bytes, because an existing directory never measures exactly 0 bytes - the directory inodes themselves count - so a size-based control cannot see any of those cases.
@@ -35,7 +35,7 @@ zabbix_export:
         License: MIT (c) 2026 Konstantin Tyutyunnik
       vendor:
         name: itforprof.com
-        version: 1.0.0
+        version: 1.1.0
       groups:
         - name: Templates/Applications
       items:
@@ -111,22 +111,22 @@ zabbix_export:
               priority: AVERAGE
               description: 'The directory walk stopped returning, most likely a timeout. This degrades exactly when the buffer is large and the disk is under pressure, which is when the size signal matters most. Without this trigger the size checks would keep their last known value and stay quiet.'
             - uuid: 0f2e8d27c02c41fda28ef2a3798d6b02
-              expression: 'last(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}])>{$VECTOR.BUFFER.WARN}'
+              expression: 'min(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],1h)>{$VECTOR.BUFFER.WARN}'
               name: 'Vector disk buffer is above the warning level'
               event_name: 'Vector buffer on {HOST.NAME} at {ITEM.LASTVALUE1}: past VECTOR.BUFFER.WARN, delivery has been falling behind'
               priority: WARNING
-              description: 'Earliest signal that delivery is degrading, hours ahead of the receiver-side lag trigger. This is a level, not a trend: a buffer parked at a steady size above the threshold keeps this open, and a buffer climbing fast but still under the threshold does not open it at all. Detecting growth instead would need a baseline, and picking that baseline is an estate decision - see docs/known-limits.md.'
+              description: 'Earliest sender-side signal that delivery is degrading. Reads the floor over an hour, not the last sample, because the last sample cannot tell a backlog from normal writing: a Vector disk buffer is a chain of append-only 128 MiB segments deleted only once fully processed, so on a perfectly healthy shipper the directory size sweeps 0 to 128 MiB and back on every rollover. A one-hour floor above the threshold means at least one extra segment stayed unprocessed for a full hour, which normal rollover cannot produce. Costs up to an hour of detection delay; the receiver-side lag trigger is the primary signal and is unaffected. Still a level and not a trend: growth below the threshold is invisible - see docs/known-limits.md.'
               dependencies:
                 - name: 'Vector buffer size is not being measured'
                   expression: 'nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.NODATA})=1'
                 - name: 'Vector disk buffer is nearly full'
-                  expression: 'last(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}])>{$VECTOR.BUFFER.HIGH}'
+                  expression: 'min(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],1h)>{$VECTOR.BUFFER.HIGH}'
             - uuid: d308b5118a8b4ee58f213eb13fb71f7e
-              expression: 'last(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}])>{$VECTOR.BUFFER.HIGH}'
+              expression: 'min(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],1h)>{$VECTOR.BUFFER.HIGH}'
               name: 'Vector disk buffer is nearly full'
               event_name: 'Vector buffer on {HOST.NAME} at {ITEM.LASTVALUE1}: with when_full block, journald reads stall when it fills'
               priority: AVERAGE
-              description: 'Delivery has been failing for a while and the shipper is queueing to disk. When the buffer reaches max_size and when_full is block, the host stops reading its own journal.'
+              description: 'Delivery has been failing for a while and the shipper is queueing to disk: unprocessed segments have held the buffer near max_size for a full hour. When the buffer reaches max_size and when_full is block, the host stops reading its own journal. Set this below the sinks max_size - Vector refuses a max_size under 256 MiB, so on a shipper configured at that minimum a threshold above it can never be reached.'
               dependencies:
                 - name: 'Vector buffer size is not being measured'
                   expression: 'nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.NODATA})=1'
@@ -176,7 +176,7 @@ zabbix_export:
           description: 'Bytes. 90 percent of a 512 MiB max_size.'
         - macro: '{$VECTOR.BUFFER.WARN}'
           value: '268435456'
-          description: 'Bytes. Half of a 512 MiB max_size. With when_full block, a filling buffer stalls journald reads hours before delivery stops.'
+          description: 'Bytes. Half of a 512 MiB max_size, which is also exactly two 128 MiB segments. Compared against the one-hour floor, so normal rollover cannot reach it. With when_full block, a filling buffer stalls journald reads hours before delivery stops.'
         - macro: '{$VECTOR.NODATA}'
           value: 15m
           description: 'nodata window for all three agent items, about 3x their interval.'
