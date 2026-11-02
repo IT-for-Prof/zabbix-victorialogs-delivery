@@ -19,10 +19,13 @@ zabbix_export:
         
         Why the positive control: vfs.dir.size answers 0 for a directory that does not exist, with no error and no unsupported state, and it skips entries it cannot read rather than failing. A wrong path macro, a shipper configured with a memory buffer, or a data subdirectory the agent cannot enter all leave the size item on a permanently healthy number and its trigger unable to fire. The control counts files under the path rather than measuring bytes, because an existing directory never measures exactly 0 bytes - the directory inodes themselves count - so a size-based control cannot see any of those cases.
         
+        When the agent itself stops answering, all three agent items go silent together. A parent trigger over all three then raises one problem instead of three per-item ones.
+        
         NOT available: whether delivery is actually arriving. That is only knowable at the receiver. Link the companion template VictoriaLogs delivery by HTTP for that.
         
         Macros:
         - VECTOR.UNIT: systemd unit name, default vector.service.
+        - VECTOR.AGENT.WINDOW: how long all three items must be silent together before the agent counts as gone, default 10m.
         - VECTOR.RESTARTS.WARN: automatic restarts within an hour before the unit counts as crash-looping, default 2.
         - VECTOR.BUFFER.DIR: buffer directory, default /var/lib/vector/buffer. Walked twice per interval, once for size and once for the file count.
         - VECTOR.BUFFER.WARN: bytes, default half of a 512 MiB max_size.
@@ -35,7 +38,7 @@ zabbix_export:
         License: MIT (c) 2026 Konstantin Tyutyunnik
       vendor:
         name: itforprof.com
-        version: 1.1.0
+        version: 1.2.0
       groups:
         - name: Templates/Applications
       items:
@@ -64,9 +67,12 @@ zabbix_export:
             - uuid: 6bfbe7bf45da43c0be47e54112af9f7f
               expression: 'nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.NODATA})=1'
               name: 'Vector service state is unknown'
-              event_name: 'Vector state on {HOST.NAME} is unknown: the agent stopped answering'
+              event_name: 'Vector state on {HOST.NAME} is unknown: the agent answers, but the systemd check stopped returning'
               priority: AVERAGE
               description: 'The state item itself stopped collecting, so the running and buffer checks below cannot mean anything and depend on this.'
+              dependencies:
+                - name: 'Vector agent channel is silent'
+                  expression: 'nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.AGENT.WINDOW})=1'
         - uuid: 9b6ae5a5d89c46fda487e82cd7985d4a
           name: 'Vector automatic restarts'
           type: ZABBIX_ACTIVE
@@ -74,7 +80,7 @@ zabbix_export:
           delay: 5m
           history: 7d
           trends: '0'
-          description: 'systemd restart counter for the unit. A shipper that crashes and is restarted by its Restart= policy reads active at every poll, so the state item alone cannot see a crash loop. The third key parameter is required: NRestarts lives on the Service interface, and the default Unit interface answers Unknown interface. This item has no blindness root of its own: it shares the agent, the systemd plugin and the D-Bus connection with the state item, so every failure that stops collection in practice - agent down, D-Bus down, unit renamed - stops both, and the root on the state item already reports it. The two are not literally the same call, though: ActiveState reads the Unit interface and this reads Service, so a fault scoped to one interface would silence this item alone. That gap is accepted rather than unnoticed.'
+          description: 'systemd restart counter for the unit. A shipper that crashes and is restarted by its Restart= policy reads active at every poll, so the state item alone cannot see a crash loop. The third key parameter is required: NRestarts lives on the Service interface, and the default Unit interface answers Unknown interface. This item has no blindness root of its own: it shares the agent, the systemd plugin and the D-Bus connection with the state item, so every failure that stops collection in practice - agent down, D-Bus down, unit renamed - stops both, and the state root, or the agent channel parent above it, already reports it. The two are not literally the same call, though: ActiveState reads the Unit interface and this reads Service, so a fault scoped to one interface would silence this item alone. That gap is accepted rather than unnoticed.'
           tags:
             - tag: component
               value: shipper
@@ -110,6 +116,9 @@ zabbix_export:
               event_name: 'Buffer size on {HOST.NAME} stopped being measured: the size thresholds below cannot fire'
               priority: AVERAGE
               description: 'The directory walk stopped returning, most likely a timeout. This degrades exactly when the buffer is large and the disk is under pressure, which is when the size signal matters most. Without this trigger the size checks would keep their last known value and stay quiet.'
+              dependencies:
+                - name: 'Vector agent channel is silent'
+                  expression: 'nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.AGENT.WINDOW})=1'
             - uuid: 0f2e8d27c02c41fda28ef2a3798d6b02
               expression: 'min(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],1h)>{$VECTOR.BUFFER.WARN}'
               name: 'Vector disk buffer is above the warning level'
@@ -162,12 +171,18 @@ zabbix_export:
               event_name: 'The buffer positive control on {HOST.NAME} stopped reporting: the blindness check is itself blind'
               priority: AVERAGE
               description: 'This item is the positive control that proves the buffer size reading is real. If it alone stops collecting while the unit state keeps reporting, the blindness trigger freezes on its last value and never fires. Its own root closes that hole.'
+              dependencies:
+                - name: 'Vector agent channel is silent'
+                  expression: 'nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.AGENT.WINDOW})=1'
       tags:
         - tag: class
           value: log-delivery
         - tag: vendor
           value: vector
       macros:
+        - macro: '{$VECTOR.AGENT.WINDOW}'
+          value: 10m
+          description: 'How long all three items must be silent together before the agent channel parent fires: two missed 5m polls. VECTOR.NODATA minus this window must stay larger than the spread between the three items'' polls, which is under a minute in practice. Otherwise the per-item roots can fire before their parent.'
         - macro: '{$VECTOR.BUFFER.DIR}'
           value: /var/lib/vector/buffer
           description: 'Vector disk buffer directory.'
@@ -179,13 +194,25 @@ zabbix_export:
           description: 'Bytes. Half of a 512 MiB max_size, which is also exactly two 128 MiB segments. Compared against the one-hour floor, so normal rollover cannot reach it. With when_full block, a filling buffer stalls journald reads hours before delivery stops.'
         - macro: '{$VECTOR.NODATA}'
           value: 15m
-          description: 'nodata window for all three agent items, about 3x their interval.'
+          description: 'nodata window for all three agent items, about 3x their interval. Must stay longer than VECTOR.AGENT.WINDOW, or the roots fire before their parent.'
         - macro: '{$VECTOR.RESTARTS.WARN}'
           value: '2'
           description: 'Automatic restarts within an hour before the unit counts as crash-looping. A single planned restart stays quiet.'
         - macro: '{$VECTOR.UNIT}'
           value: vector.service
           description: 'systemd unit name of the log shipper.'
+  triggers:
+    - uuid: 658cc9ecb2ed4f2a9b0c1c442b5a3de2
+      expression: 'nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.AGENT.WINDOW})=1'
+      name: 'Vector agent channel is silent'
+      event_name: 'Vector checks on {HOST.NAME} are all silent: the agent stopped answering or refuses these keys'
+      priority: AVERAGE
+      description: 'All three agent items stopped arriving at once, so the cause is the agent or the host, not the shipper. The three per-item roots depend on this trigger, and a dead host raises one problem instead of three. The expression is an AND of three nodata checks. While any one item still arrives, this trigger stays OK, and a single failing directory walk is still reported by its own root.'
+      tags:
+        - tag: component
+          value: shipper
+        - tag: scope
+          value: availability
   graphs:
     - uuid: 789e228616b4478abb4457b2f1bfb8bf
       name: 'Vector disk buffer size'
