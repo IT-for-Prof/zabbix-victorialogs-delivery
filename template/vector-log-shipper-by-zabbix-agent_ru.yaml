@@ -1,5 +1,5 @@
-# GENERATED from vector-log-shipper-by-zabbix-agent.yaml + i18n/ru.yaml by scripts/translate-templates.py.
-# Do not edit: change the English template or the catalog and rerun the script.
+# GENERATED from vector-log-shipper-by-zabbix-agent.yaml: only names and descriptions are translated;
+# UUIDs, keys, expressions, macros and tags are identical. Do not edit by hand.
 zabbix_export:
   version: '7.0'
   template_groups:
