@@ -1,0 +1,225 @@
+# GENERATED from vector-log-shipper-by-zabbix-agent.yaml + i18n/ru.yaml by scripts/translate-templates.py.
+# Do not edit: change the English template or the catalog and rerun the script.
+zabbix_export:
+  version: '7.0'
+  template_groups:
+  - uuid: a571c0d144b14fd4a87a9d9b2aa9fcd6
+    name: Templates/Applications
+  templates:
+  - uuid: dde74ad40bdd40668ef9ff4c8a03c25b
+    template: Vector log shipper by Zabbix agent
+    name: Шиппер логов Vector через агент Zabbix
+    description: |
+      Опережающие признаки на стороне отправителя для шиппера логов Vector, только на встроенных ключах агента Zabbix. На наблюдаемый хост ничего не ставится: ни скрипта, ни UserParameter, ни правки конфига.
+
+      Нужен Zabbix agent 2 ради ключа systemd, версии 7.0 или новее — ради таймаута 30 с у двух обходов каталога. Агент постарше игнорирует таймаут элемента и берёт Timeout из своего файла конфигурации, по умолчанию 3 секунды. На обход большого буфера этого мало, и проверка падает как раз тогда, когда сигнал буфера важнее всего. На старом агенте вместо этого поднимите Timeout в zabbix_agent2.conf.
+
+      Что измеряется:
+      - состояние юнита шиппера в systemd и его счётчик автоматических перезапусков: юнит в цикле падений при каждом опросе выглядит active;
+      - размер дискового буфера Vector как минимум за час: сырой размер ходит от 0 до 128 МиБ при каждой смене сегмента, даже когда доставка полностью здорова;
+      - положительный контроль: в пути буфера действительно есть файлы.
+
+      Зачем положительный контроль. vfs.dir.size отвечает 0 для несуществующего каталога, без ошибки и без состояния unsupported, а записи, которые не может прочитать, пропускает и не падает. Неверный макрос пути, шиппер с буфером в памяти или подкаталог с данными, куда агент не может войти, — во всех трёх случаях элемент размера навсегда показывает здоровое число, и его триггер не может сработать. Контроль считает файлы в пути вместо байтов. Существующий каталог никогда не весит ровно 0 байт, потому что учитываются иноды самих каталогов, и контроль по размеру ни одного из этих случаев не увидит.
+
+      Когда перестаёт отвечать сам агент, все три элемента агента замолкают одновременно. Тогда родительский триггер над всеми тремя поднимает одну проблему вместо трёх по элементам.
+
+      НЕ измеряется: доходят ли логи до приёмника на самом деле. Это видно только на приёмнике. Для этого привяжите парный шаблон «Доставка логов в VictoriaLogs по HTTP».
+
+      Макросы:
+      - VECTOR.UNIT: имя юнита systemd, по умолчанию vector.service.
+      - VECTOR.AGENT.WINDOW: сколько все три элемента должны молчать вместе, чтобы агент считался пропавшим, по умолчанию 10m.
+      - VECTOR.RESTARTS.WARN: сколько автоматических перезапусков за час нужно, чтобы юнит считался в цикле падений, по умолчанию 2.
+      - VECTOR.BUFFER.DIR: каталог буфера, по умолчанию /var/lib/vector/buffer. Обходится дважды за интервал: для размера и для подсчёта файлов.
+      - VECTOR.BUFFER.WARN: байты, по умолчанию половина max_size 512 МиБ.
+      - VECTOR.BUFFER.HIGH: байты, по умолчанию 90 % от max_size 512 МиБ. При when_full = block полный буфер останавливает чтение хостом собственного журнала.
+
+      Если max_size в синке Vector на хосте отличается от 512 МиБ, поменяйте оба порога в байтах под него.
+
+      Автор:    Константин Тютюнник
+      Сайт:     https://itforprof.com
+      Лицензия: MIT (c) 2026 Konstantin Tyutyunnik
+    vendor:
+      name: itforprof.com
+      version: 1.2.0
+    groups:
+    - name: Templates/Applications
+    items:
+    - uuid: d7c1cab8adbf43109789bbcdc212d2d7
+      name: Состояние службы Vector
+      type: ZABBIX_ACTIVE
+      key: systemd.unit.info[{$VECTOR.UNIT},ActiveState]
+      delay: 5m
+      history: 7d
+      value_type: CHAR
+      tags:
+      - tag: component
+        value: shipper
+      - tag: scope
+        value: availability
+      triggers:
+      - uuid: 7523f45986254fc4b3b1aadae9ab9a43
+        expression: last(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState])<>"active"
+        name: Vector не запущен
+        event_name: 'Vector на {HOST.NAME} в состоянии {ITEM.LASTVALUE1}: хост перестал отправлять логи'
+        priority: AVERAGE
+        description: Опережающий признак. Триггер задержки на стороне приёмника для этого хоста сработает в пределах порога задержки, а этот срабатывает сразу.
+        dependencies:
+        - name: Состояние службы Vector неизвестно
+          expression: nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.NODATA})=1
+      - uuid: 6bfbe7bf45da43c0be47e54112af9f7f
+        expression: nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.NODATA})=1
+        name: Состояние службы Vector неизвестно
+        event_name: 'Состояние Vector на {HOST.NAME} неизвестно: агент отвечает, но проверка systemd перестала возвращать данные'
+        priority: AVERAGE
+        description: Перестал собираться сам элемент состояния, поэтому проверки работы и буфера ниже теряют смысл и зависят от этого триггера.
+        dependencies:
+        - name: Канал агента Vector молчит
+          expression: nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.AGENT.WINDOW})=1
+    - uuid: 9b6ae5a5d89c46fda487e82cd7985d4a
+      name: Автоматические перезапуски Vector
+      type: ZABBIX_ACTIVE
+      key: systemd.unit.info[{$VECTOR.UNIT},NRestarts,Service]
+      delay: 5m
+      history: 7d
+      trends: '0'
+      description: 'Счётчик перезапусков юнита в systemd. Шиппер, который падает и перезапускается по политике Restart=, при каждом опросе выглядит active, поэтому один элемент состояния цикл падений не видит. Третий параметр ключа обязателен: NRestarts находится в интерфейсе Service, а интерфейс по умолчанию, Unit, отвечает Unknown interface. Своего корня слепоты у элемента нет. Он делит с элементом состояния агент, плагин systemd и соединение D-Bus, поэтому любой сбой, который на практике останавливает сбор, — упал агент, упала D-Bus, переименован юнит — останавливает оба. Об этом уже сообщает корень состояния или родительский триггер канала агента над ним. Вызовы у них всё же разные: ActiveState читается из интерфейса Unit, а этот элемент читает Service, так что сбой только одного интерфейса заглушит лишь этот элемент. Этот пробел известен и принят.'
+      tags:
+      - tag: component
+        value: shipper
+      - tag: scope
+        value: availability
+      triggers:
+      - uuid: 9f29b2530e0e4f2093c1e1e5ac09bd7a
+        expression: (last(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},NRestarts,Service])-min(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},NRestarts,Service],1h))>{$VECTOR.RESTARTS.WARN}
+        name: Vector перезапускается по кругу
+        event_name: systemd перезапустил Vector на {HOST.NAME} больше {$VECTOR.RESTARTS.WARN} раз за последний час
+        priority: WARNING
+        description: При каждом опросе юнит работает, поэтому ни триггер состояния, ни триггеры буфера ничего не видят, а шиппер раз за разом падает и перезапускается. Каждый перезапуск теряет то, что было в пути. Триггер считает прирост за час, а не любое изменение, поэтому один плановый перезапуск проходит тихо, а сброс счётчика в ноль при ручной остановке и запуске юнита ничего не ломает.
+        dependencies:
+        - name: Состояние службы Vector неизвестно
+          expression: nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.NODATA})=1
+    - uuid: 0be1d5d09f0e4d1b9e73d4adf2357c54
+      name: Размер дискового буфера Vector
+      type: ZABBIX_ACTIVE
+      key: vfs.dir.size[{$VECTOR.BUFFER.DIR}]
+      delay: 5m
+      history: 7d
+      units: B
+      timeout: 30s
+      tags:
+      - tag: component
+        value: shipper
+      - tag: scope
+        value: capacity
+      triggers:
+      - uuid: c458c20e60ee4aea87faac8359518140
+        expression: nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.NODATA})=1
+        name: Размер буфера Vector не измеряется
+        event_name: 'Размер буфера на {HOST.NAME} перестал измеряться: пороги размера ниже не сработают'
+        priority: AVERAGE
+        description: Обход каталога перестал возвращать данные, скорее всего по таймауту. Это случается как раз тогда, когда буфер большой и диск нагружен, то есть когда сигнал размера важнее всего. Без этого триггера проверки размера держали бы последнее известное значение и молчали.
+        dependencies:
+        - name: Канал агента Vector молчит
+          expression: nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.AGENT.WINDOW})=1
+      - uuid: 0f2e8d27c02c41fda28ef2a3798d6b02
+        expression: min(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],1h)>{$VECTOR.BUFFER.WARN}
+        name: Дисковый буфер Vector выше уровня предупреждения
+        event_name: 'Буфер Vector на {HOST.NAME} — {ITEM.LASTVALUE1}: выше VECTOR.BUFFER.WARN, доставка отстаёт'
+        priority: WARNING
+        description: 'Самый ранний сигнал на стороне отправителя, что доставка деградирует. Берётся минимум за час, а не последний замер: последний замер не отличает очередь от обычной записи. Дисковый буфер Vector — цепочка сегментов по 128 МиБ, в которые только дописывают и которые удаляются после полной обработки. Поэтому у полностью здорового шиппера размер каталога ходит от 0 до 128 МиБ и обратно при каждой смене сегмента. Минимум за час выше порога означает, что хотя бы один лишний сегмент целый час оставался необработанным; обычная смена сегментов так не делает. Цена — до часа задержки обнаружения; основной сигнал, триггер задержки на приёмнике, от этого не страдает. Это всё же уровень, а не тренд: рост ниже порога не виден, см. docs/known-limits.md.'
+        dependencies:
+        - name: Размер буфера Vector не измеряется
+          expression: nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.NODATA})=1
+        - name: Дисковый буфер Vector почти заполнен
+          expression: min(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],1h)>{$VECTOR.BUFFER.HIGH}
+      - uuid: d308b5118a8b4ee58f213eb13fb71f7e
+        expression: min(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],1h)>{$VECTOR.BUFFER.HIGH}
+        name: Дисковый буфер Vector почти заполнен
+        event_name: 'Буфер Vector на {HOST.NAME} — {ITEM.LASTVALUE1}: при when_full = block заполнение остановит чтение journald'
+        priority: AVERAGE
+        description: 'Доставка давно не проходит, и шиппер копит очередь на диске: необработанные сегменты целый час держат буфер у max_size. Когда буфер достигает max_size при when_full = block, хост перестаёт читать собственный журнал. Ставьте порог ниже max_size синка. Vector не принимает max_size меньше 256 МиБ, поэтому у шиппера, настроенного на этот минимум, порог выше него недостижим.'
+        dependencies:
+        - name: Размер буфера Vector не измеряется
+          expression: nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.NODATA})=1
+        - name: Vector не запущен
+          expression: last(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState])<>"active"
+    - uuid: c7643e1cd24d40c38edda0268ee4e220
+      name: Файлы дискового буфера Vector
+      type: ZABBIX_ACTIVE
+      key: vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file]
+      delay: 5m
+      history: 7d
+      trends: '0'
+      timeout: 30s
+      description: 'Положительный контроль. vfs.dir.size отвечает 0 для отсутствующего каталога и не падает, а записи, которые не может прочитать, пропускает, тоже не падая. Без контроля неверный макрос пути, шиппер с буфером в памяти или нечитаемый подкаталог с данными оставили бы элемент размера на навсегда здоровом числе. Контроль считает файлы вместо байтов: существующий каталог никогда не весит ровно 0 байт, потому что учитываются иноды самих каталогов, и контроль по размеру ни одного из этих случаев не обнаружит. Цена — второй обход каталога рядом с элементом размера.'
+      tags:
+      - tag: component
+        value: shipper
+      - tag: scope
+        value: availability
+      triggers:
+      - uuid: 6ae4f7062ede4adfaa2990074bf6c4ea
+        expression: last(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file])=0
+        name: Алерт буфера Vector ослеп
+        event_name: 'В пути буфера на {HOST.NAME} нет файлов: проверка размера буфера не сможет сработать'
+        priority: AVERAGE
+        description: В пути буфера нет ни одного файла. Либо макрос пути неверен, либо у шиппера не настроен дисковый буфер, либо агент не может пройти по поддереву. Во всех трёх случаях элемент размера продолжает показывать небольшое, навсегда здоровое число, и его триггер не сработает никогда.
+        dependencies:
+        - name: Число файлов буфера Vector не измеряется
+          expression: nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.NODATA})=1
+      - uuid: 6efdf4651ade4116afb2bf38460c7fa3
+        expression: nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.NODATA})=1
+        name: Число файлов буфера Vector не измеряется
+        event_name: 'Положительный контроль буфера на {HOST.NAME} перестал отвечать: проверка слепоты сама ослепла'
+        priority: AVERAGE
+        description: 'Этот элемент — положительный контроль: он доказывает, что размер буфера действительно измеряется. Если перестанет собираться только он, а состояние юнита продолжит приходить, триггер слепоты застынет на последнем значении и не сработает. Эту дыру закрывает его собственный корень.'
+        dependencies:
+        - name: Канал агента Vector молчит
+          expression: nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.AGENT.WINDOW})=1
+    tags:
+    - tag: class
+      value: log-delivery
+    - tag: vendor
+      value: vector
+    macros:
+    - macro: '{$VECTOR.AGENT.WINDOW}'
+      value: 10m
+      description: 'Сколько все три элемента должны молчать вместе, прежде чем сработает родительский триггер канала агента: два пропущенных опроса по 5 мин. VECTOR.NODATA минус это окно должно оставаться больше разброса между опросами трёх элементов, на практике это меньше минуты. Иначе корни по элементам могут сработать раньше родителя.'
+    - macro: '{$VECTOR.BUFFER.DIR}'
+      value: /var/lib/vector/buffer
+      description: Каталог дискового буфера Vector.
+    - macro: '{$VECTOR.BUFFER.HIGH}'
+      value: '483183820'
+      description: Байты. 90 % от max_size 512 МиБ.
+    - macro: '{$VECTOR.BUFFER.WARN}'
+      value: '268435456'
+      description: Байты. Половина max_size 512 МиБ — это ровно два сегмента по 128 МиБ. Сравнивается с минимумом за час, поэтому обычная смена сегментов до него не доходит. При when_full = block заполняющийся буфер останавливает чтение journald за часы до того, как встанет доставка.
+    - macro: '{$VECTOR.NODATA}'
+      value: 15m
+      description: Окно nodata для всех трёх элементов агента, примерно три их интервала. Должно оставаться длиннее VECTOR.AGENT.WINDOW, иначе корни сработают раньше родителя.
+    - macro: '{$VECTOR.RESTARTS.WARN}'
+      value: '2'
+      description: Сколько автоматических перезапусков за час нужно, чтобы юнит считался в цикле падений. Один плановый перезапуск проходит тихо.
+    - macro: '{$VECTOR.UNIT}'
+      value: vector.service
+      description: Имя юнита systemd для шиппера логов.
+  triggers:
+  - uuid: 658cc9ecb2ed4f2a9b0c1c442b5a3de2
+    expression: nodata(/Vector log shipper by Zabbix agent/systemd.unit.info[{$VECTOR.UNIT},ActiveState],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.size[{$VECTOR.BUFFER.DIR}],{$VECTOR.AGENT.WINDOW})=1 and nodata(/Vector log shipper by Zabbix agent/vfs.dir.count[{$VECTOR.BUFFER.DIR},,,file],{$VECTOR.AGENT.WINDOW})=1
+    name: Канал агента Vector молчит
+    event_name: 'Все проверки Vector на {HOST.NAME} молчат: агент перестал отвечать или отклоняет эти ключи'
+    priority: AVERAGE
+    description: Все три элемента агента перестали приходить одновременно, значит, причина в агенте или хосте, а не в шиппере. Три корня по элементам зависят от этого триггера, и мёртвый хост поднимает одну проблему вместо трёх. Выражение — логическое И из трёх проверок nodata. Пока приходит хоть один элемент, триггер остаётся в OK, а сбой одного обхода каталога по-прежнему сообщает его собственный корень.
+    tags:
+    - tag: component
+      value: shipper
+    - tag: scope
+      value: availability
+  graphs:
+  - uuid: 789e228616b4478abb4457b2f1bfb8bf
+    name: Размер дискового буфера Vector
+    graph_items:
+    - color: 1A7C11
+      item:
+        host: Vector log shipper by Zabbix agent
+        key: vfs.dir.size[{$VECTOR.BUFFER.DIR}]
